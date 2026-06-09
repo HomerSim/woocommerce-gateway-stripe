@@ -31,12 +31,12 @@ class WC_Stripe_Customer {
 	/**
 	 * String prefix for Stripe payment methods request transient.
 	 */
-	const PAYMENT_METHODS_TRANSIENT_KEY = 'stripe_payment_methods_';
+	public const PAYMENT_METHODS_TRANSIENT_KEY = 'stripe_payment_methods_';
 
 	/**
 	 * Queryable Stripe payment method types.
 	 */
-	const STRIPE_PAYMENT_METHODS = [
+	public const STRIPE_PAYMENT_METHODS = [
 		WC_Stripe_UPE_Payment_Method_CC::STRIPE_ID,
 		WC_Stripe_UPE_Payment_Method_LINK::STRIPE_ID,
 		WC_Stripe_UPE_Payment_Method_Sepa::STRIPE_ID,
@@ -100,7 +100,9 @@ class WC_Stripe_Customer {
 	/**
 	 * Set Stripe customer ID.
 	 *
-	 * @param [type] $id [description]
+	 * @param string|array $id The Stripe customer ID, or an array containing the customer ID for backwards compatibility with pre-3.0 data storage.
+	 *
+	 * @return void
 	 */
 	public function set_id( $id ) {
 		// Backwards compat for customer ID stored in array format. (Pre 3.0)
@@ -226,6 +228,18 @@ class WC_Stripe_Customer {
 		$metadata                      = [];
 		$defaults['metadata']          = apply_filters( 'wc_stripe_customer_metadata', $metadata, $user );
 		$defaults['preferred_locales'] = $this->get_customer_preferred_locale( $user );
+
+		// Add the billing phone, when available. Issuers and Stripe Radar may use it for risk decisioning.
+		$billing_phone = '';
+		if ( $user ) {
+			$billing_phone = get_user_meta( $user->ID, 'billing_phone', true );
+		}
+		if ( empty( $billing_phone ) ) {
+			$billing_phone = $this->get_billing_data_field( 'billing_phone', $order );
+		}
+		if ( ! empty( $billing_phone ) ) {
+			$defaults['phone'] = $billing_phone;
+		}
 
 		// Add customer address default values.
 		$address_fields = [
@@ -370,6 +384,7 @@ class WC_Stripe_Customer {
 			'billing_email',
 			'billing_first_name',
 			'billing_last_name',
+			'billing_phone',
 			'billing_address_1',
 			'billing_address_2',
 			'billing_postcode',
@@ -397,6 +412,8 @@ class WC_Stripe_Customer {
 					return $order->get_billing_first_name();
 				case 'billing_last_name':
 					return $order->get_billing_last_name();
+				case 'billing_phone':
+					return $order->get_billing_phone();
 				case 'billing_address_1':
 					return $order->get_billing_address_1();
 				case 'billing_address_2':
@@ -427,7 +444,9 @@ class WC_Stripe_Customer {
 	 */
 	public function maybe_create_customer() {
 		if ( ! $this->get_id() ) {
-			return $this->set_id( $this->create_customer() );
+			$customer_id = $this->create_customer();
+			$this->set_id( $customer_id );
+			return $customer_id;
 		}
 
 		$response = WC_Stripe_API::retrieve( 'customers/' . $this->get_id() );
@@ -470,7 +489,7 @@ class WC_Stripe_Customer {
 	 * @param string|null   $current_context The context we are creating the customer in (optional).
 	 * @param WC_Order|null $order           The order object (optional). If provided, billing details will be retrieved from the order.
 	 *
-	 * @return WP_Error|int
+	 * @return string Stripe customer ID in the format `cus_XXXXXXXXXXXXXX`
 	 *
 	 * @throws WC_Stripe_Exception
 	 */
@@ -530,7 +549,7 @@ class WC_Stripe_Customer {
 	 * @param bool          $is_retry Whether the current call is a retry (optional, defaults to false). If true, then an exception will be thrown instead of further retries on error.
 	 * @param WC_Order|null $order    The order object (optional). If provided, billing details will be retrieved from the order.
 	 *
-	 * @return string Customer ID
+	 * @return string Stripe customer ID in the format `cus_XXXXXXXXXXXXXX`
 	 *
 	 * @throws WC_Stripe_Exception
 	 */
@@ -577,7 +596,7 @@ class WC_Stripe_Customer {
 	 * @param string|null   $current_context The context we are creating the customer in (optional).
 	 * @param WC_Order|null $order           The order object (optional). If provided, billing details will be retrieved from the order.
 	 *
-	 * @return string Customer ID
+	 * @return string Stripe customer ID in the format `cus_XXXXXXXXXXXXXX`
 	 *
 	 * @throws WC_Stripe_Exception
 	 */
@@ -683,6 +702,7 @@ class WC_Stripe_Customer {
 							$wc_token->set_expiry_month( $response->card->exp_month );
 							$wc_token->set_expiry_year( $response->card->exp_year );
 							$wc_token->set_fingerprint( $response->card->fingerprint );
+							$wc_token->set_wallet_type( (string) ( $response->card->wallet->type ?? '' ) );
 						}
 						break;
 				}
@@ -1187,6 +1207,11 @@ class WC_Stripe_Customer {
 					'country'     => $object_to_parse->get_shipping_country(),
 				],
 			];
+
+			$shipping_phone = $object_to_parse->get_shipping_phone();
+			if ( ! empty( $shipping_phone ) ) {
+				$data['shipping']['phone'] = $shipping_phone;
+			}
 		}
 
 		return $data;

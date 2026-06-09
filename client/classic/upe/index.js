@@ -9,6 +9,7 @@ import { initializeAlwaysExpandedOptimizedCheckout } from './always-expanded-opt
 import { legacyHashchangeHandler } from './legacy-support';
 import './style.scss';
 import './deferred-intent.js';
+import 'wcstripe/stripe-utils/copy-test-number';
 import {
 	maybeShowCashAppLimitNotice,
 	removeCashAppLimitNotice,
@@ -310,6 +311,15 @@ jQuery( function ( $ ) {
 				);
 			} else {
 				removeCashAppLimitNotice();
+			}
+
+			// Change the payment method container title when the Optimized Checkout is enabled
+			const stripeServerData = getStripeServerData();
+			if ( stripeServerData?.shouldShowOptimizedCheckout ) {
+				$( 'label[for=payment_method_stripe]' ).text(
+					stripeServerData?.optimizedCheckoutClassicTitle ||
+						'Payment options'
+				);
 			}
 
 			maybeClearBlikCodeValidation();
