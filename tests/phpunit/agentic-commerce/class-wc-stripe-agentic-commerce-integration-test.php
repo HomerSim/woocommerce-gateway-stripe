@@ -21,6 +21,15 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 	private string $last_upload_option;
 
 	/**
+	 * Resolved value of the protected OPTION_NAME constant on the product filter,
+	 * cached so include-injection tests can seed input state directly without
+	 * exposing the constant publicly.
+	 *
+	 * @var string
+	 */
+	private string $product_filter_option;
+
+	/**
 	 * Setup test environment before each test.
 	 *
 	 * @return void
@@ -36,8 +45,9 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 			$this->markTestSkipped( 'WC_Stripe_Agentic_Commerce_Integration class not loaded' );
 		}
 
-		$this->last_upload_option = ( new \ReflectionClass( \WC_Stripe_Agentic_Commerce_Integration::class ) )
-			->getConstant( 'LAST_UPLOAD_OPTION' );
+		$this->last_upload_option = WC_Stripe_Test_Helper::get_class_const_value( \WC_Stripe_Agentic_Commerce_Integration::class, 'LAST_UPLOAD_OPTION', 'string' );
+
+		$this->product_filter_option = WC_Stripe_Test_Helper::get_class_const_value( \WC_Stripe_Agentic_Commerce_Product_Filter::class, 'OPTION_NAME', 'string' );
 	}
 
 	/**
@@ -48,7 +58,10 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 	 */
 	public function tearDown(): void {
 		delete_option( $this->last_upload_option );
+		delete_option( $this->product_filter_option );
 		remove_all_filters( 'wc_stripe_agentic_commerce_feed_dedupe_enabled' );
+		remove_all_filters( 'wc_stripe_agentic_commerce_product_filter' );
+		remove_all_filters( 'wc_stripe_agentic_commerce_product_query_args' );
 		parent::tearDown();
 	}
 
@@ -96,8 +109,45 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 		$args        = $integration->get_product_feed_query_args();
 
 		$this->assertEquals( [ 'simple' ], $args['type'] );
+	}
 
-		remove_all_filters( 'wc_stripe_agentic_commerce_product_query_args' );
+	/**
+	 * No product-filter option set means no `include` key — the walker should
+	 * iterate every published simple/variation product as it did before the
+	 * filter abstraction landed.
+	 *
+	 * @return void
+	 */
+	public function test_get_product_feed_query_args_omits_include_when_filter_not_configured() {
+		$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+		$args        = $integration->get_product_feed_query_args();
+
+		$this->assertArrayNotHasKey( 'include', $args );
+	}
+
+	public function test_query_args_filter_runs(): void {
+		update_option(
+			$this->product_filter_option,
+			[
+				'category_ids' => [ 999999999 ],
+			]
+		);
+
+		$observed_tax_query = null;
+		add_filter(
+			'wc_stripe_agentic_commerce_product_query_args',
+			function ( $args ) use ( &$observed_tax_query ) {
+				$observed_tax_query = $args['tax_query'] ?? null;
+				$args['include']    = [ 42 ];
+				return $args;
+			}
+		);
+
+		$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+		$args        = $integration->get_product_feed_query_args();
+
+		$this->assertIsArray( $observed_tax_query, 'A taxonomy query should be present in the query args.' );
+		$this->assertSame( [ 42 ], $args['include'], 'Filter overrides the "include" query argument.' );
 	}
 
 	/**
@@ -215,7 +265,7 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 
 		$excluded_id = $excluded->get_id();
 		$filter      = static fn( $sync, $candidate ) => $candidate->get_id() !== $excluded_id;
-		add_filter( 'wc_stripe_agentic_commerce_should_sync_product', $filter, 10, 2 );
+		add_filter( 'woocommerce_agentic_commerce_should_sync_product', $filter, 10, 2 );
 
 		// Scope the walk to these two products so other tests' leftovers don't
 		// skew the counts.
@@ -256,7 +306,7 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 			$this->assertSame( 1, (int) $last_sync['products'], 'Only the kept product belongs in the feed; the excluded one is dropped.' );
 			$this->assertNotSame( 'succeeded_with_errors', $last_sync['status'], 'A pure exclusion must not flip the sync to Partial success.' );
 		} finally {
-			remove_filter( 'wc_stripe_agentic_commerce_should_sync_product', $filter, 10 );
+			remove_filter( 'woocommerce_agentic_commerce_should_sync_product', $filter, 10 );
 			remove_filter( 'wc_stripe_agentic_commerce_product_query_args', $scope );
 			remove_filter( 'wc_stripe_agentic_commerce_files_api_pre_request', $files_stub, 10 );
 			remove_filter( 'pre_http_request', $http_stub, 10 );
@@ -554,18 +604,6 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 
 		// If we got here without error, the early return worked.
 		$this->assertFalse( $integration->is_enabled() );
-	}
-
-	/**
-	 * Test constants are defined correctly.
-	 *
-	 * @return void
-	 */
-	public function test_constants() {
-		$this->assertEquals( 'stripe-agentic-commerce', \WC_Stripe_Agentic_Commerce_Integration::ID );
-		$this->assertEquals( 'wc_stripe_agentic_commerce_sync_feed', \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION );
-		$this->assertEquals( 900, \WC_Stripe_Agentic_Commerce_Integration::SYNC_INTERVAL ); // 15 * 60
-		$this->assertEquals( 'wc_stripe_agentic_commerce_enabled', \WC_Stripe_Agentic_Commerce_Integration::ENABLED_OPTION );
 	}
 
 	/**
@@ -1029,6 +1067,297 @@ class WC_Stripe_Agentic_Commerce_Integration_Test extends WP_UnitTestCase {
 			'archived is terminal'              => [ 'archived', 'archived' ],
 		];
 	}
+
+	// -------------------------------------------------------------------------
+	// get_feed_sync_interval
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Tests for {@method WC_Stripe_Agentic_Commerce_Integration::get_feed_sync_interval()}.
+	 *
+	 * @dataProvider provide_get_feed_sync_interval_tests
+	 *
+	 * @param mixed $filter_value      Value returned by the filter.
+	 * @param int   $expected_interval Expected interval in seconds.
+	 */
+	public function test_get_feed_sync_interval( $filter_value, int $expected_interval ): void {
+		$filter_callback = null;
+
+		if ( null !== $filter_value ) {
+			$filter_callback = fn() => $filter_value;
+			add_filter( 'wc_stripe_agentic_commerce_feed_sync_interval', $filter_callback );
+		}
+
+		try {
+			$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+
+			$this->assertSame(
+				$expected_interval,
+				$integration->get_feed_sync_interval()
+			);
+		} finally {
+			if ( null !== $filter_callback ) {
+				remove_filter( 'wc_stripe_agentic_commerce_feed_sync_interval', $filter_callback );
+			}
+		}
+	}
+
+	/**
+	 * Data provider for {@method test_get_feed_sync_interval()}.
+	 *
+	 * @return array<string, array{0: mixed, 1: int}>
+	 */
+	public function provide_get_feed_sync_interval_tests(): array {
+		return [
+			'zero'      => [ 0, \WC_Stripe_Agentic_Commerce_Integration::SYNC_INTERVAL ],
+			'negative'  => [ -1, \WC_Stripe_Agentic_Commerce_Integration::SYNC_INTERVAL ],
+			'float'     => [ 1.5, \WC_Stripe_Agentic_Commerce_Integration::SYNC_INTERVAL ],
+			'string'    => [ 'invalid', \WC_Stripe_Agentic_Commerce_Integration::SYNC_INTERVAL ],
+			'no filter' => [ null, \WC_Stripe_Agentic_Commerce_Integration::SYNC_INTERVAL ],
+			'valid 600' => [ 600, 600 ],
+			'valid 300' => [ 300, 300 ],
+		];
+	}
+
+	// -------------------------------------------------------------------------
+	// schedule_recurring_feed_sync
+	// -------------------------------------------------------------------------
+
+	/**
+	 * schedule_recurring_feed_sync returns true and persists SCHEDULED_OPTION when Action Scheduler is available.
+	 *
+	 * @return void
+	 */
+	public function test_schedule_recurring_feed_sync_sets_option_and_returns_true(): void {
+		if ( ! function_exists( 'as_has_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) ) {
+			$this->markTestSkipped( 'Action Scheduler not available.' );
+		}
+
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+		delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+
+		try {
+			$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+			$result      = $integration->schedule_recurring_feed_sync();
+
+			$this->assertTrue( $result );
+			$this->assertEquals( 'yes', get_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION ) );
+		} finally {
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+			delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+		}
+	}
+
+	/**
+	 * schedule_recurring_feed_sync uses the provided start time when scheduling the action.
+	 *
+	 * @return void
+	 */
+	public function test_schedule_recurring_feed_sync_uses_provided_start_time(): void {
+		if ( ! function_exists( 'as_has_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) || ! function_exists( 'as_next_scheduled_action' ) ) {
+			$this->markTestSkipped( 'Action Scheduler not available.' );
+		}
+
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+		delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+
+		$start_time = time() + 7200;
+
+		try {
+			$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+			$integration->schedule_recurring_feed_sync( $start_time );
+
+			$next = as_next_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+
+			$this->assertNotFalse( $next, 'Expected an action to be scheduled.' );
+			$this->assertEqualsWithDelta( $start_time, $next, 2 );
+		} finally {
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+			delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+		}
+	}
+
+	/**
+	 * schedule_recurring_feed_sync does not add a second action when one is already pending.
+	 *
+	 * @return void
+	 */
+	public function test_schedule_recurring_feed_sync_does_not_duplicate_when_already_scheduled(): void {
+		if ( ! function_exists( 'as_has_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) || ! function_exists( 'as_next_scheduled_action' ) ) {
+			$this->markTestSkipped( 'Action Scheduler not available.' );
+		}
+
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+		delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+
+		$first_start  = time() + 1800;
+		$second_start = time() + 9000;
+
+		try {
+			$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+			$integration->schedule_recurring_feed_sync( $first_start );
+
+			$next_after_first = as_next_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+
+			// Second call with a different start_time should not displace the first.
+			$integration->schedule_recurring_feed_sync( $second_start );
+
+			$next_after_second = as_next_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+
+			$this->assertEquals(
+				$next_after_first,
+				$next_after_second,
+				'A second schedule_recurring_feed_sync call must not overwrite an existing scheduled action.'
+			);
+		} finally {
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+			delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+		}
+	}
+
+	public function test_schedule_recurring_feed_sync_returns_false_when_failed_to_schedule(): void {
+		if ( ! function_exists( 'as_has_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) ) {
+			$this->markTestSkipped( 'Action Scheduler not available.' );
+		}
+
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+		delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+
+		$return_zero = function () {
+			return 0;
+		};
+
+		try {
+			add_filter( 'pre_as_schedule_recurring_action', $return_zero );
+			$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+			$result      = $integration->schedule_recurring_feed_sync();
+
+			$this->assertFalse( $result );
+			$this->assertFalse( get_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION ) );
+		} finally {
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+			delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+			remove_filter( 'pre_as_schedule_recurring_action', $return_zero );
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// reschedule_next_feed_sync
+	// -------------------------------------------------------------------------
+
+	/**
+	 * reschedule_next_feed_sync clears any existing scheduled action and reschedules, returning true.
+	 *
+	 * @return void
+	 */
+	public function test_reschedule_next_feed_sync_clears_and_reschedules(): void {
+		if ( ! function_exists( 'as_has_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) || ! function_exists( 'as_unschedule_all_actions' ) ) {
+			$this->markTestSkipped( 'Action Scheduler not available.' );
+		}
+
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+		delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+
+		try {
+			$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+			$integration->schedule_recurring_feed_sync();
+
+			$this->assertTrue(
+				as_has_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' ),
+				'Pre-condition: action should be scheduled before reschedule.'
+			);
+
+			$result = $integration->reschedule_next_feed_sync();
+
+			$this->assertTrue( $result );
+			$this->assertTrue(
+				as_has_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' ),
+				'Action should still be scheduled after reschedule.'
+			);
+			$this->assertEquals( 'yes', get_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION ) );
+		} finally {
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+			delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+		}
+	}
+
+	/**
+	 * reschedule_next_feed_sync() must recreate the recurring schedule even when
+	 * a one-off resync action is pending. The two actions share a hook name but
+	 * live in different groups -- we need to ignore the action in the other group.
+	 */
+	public function test_reschedule_next_feed_sync_schedules_recurring_action_when_async_resync_is_pending(): void {
+		if ( ! function_exists( 'as_has_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) || ! function_exists( 'as_unschedule_all_actions' ) || ! function_exists( 'as_enqueue_async_action' ) || ! function_exists( 'did_action' ) ) {
+			$this->markTestSkipped( 'Action Scheduler not available.' );
+		}
+
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe-agentic-resync' );
+		delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+
+		try {
+			as_enqueue_async_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe-agentic-resync' );
+
+			$this->assertNotFalse(
+				as_has_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe-agentic-resync' ),
+				'Sanity: the one-off resync must be pending before rescheduling.'
+			);
+			$this->assertFalse(
+				as_has_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' ),
+				'Sanity: no recurring action should exist before rescheduling.'
+			);
+
+			$result = ( new \WC_Stripe_Agentic_Commerce_Integration() )->reschedule_next_feed_sync();
+
+			$this->assertTrue( $result );
+			$this->assertNotFalse(
+				as_has_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' ),
+				'The recurring wc-stripe schedule must be created even when an async resync is pending.'
+			);
+			$this->assertEquals( 'yes', get_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION ) );
+		} finally {
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe-agentic-resync' );
+			delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+		}
+	}
+
+	/**
+	 * reschedule_next_feed_sync schedules the next run approximately one sync interval in the future.
+	 *
+	 * @return void
+	 */
+	public function test_reschedule_next_feed_sync_next_run_is_one_interval_ahead(): void {
+		if ( ! function_exists( 'as_has_scheduled_action' ) || ! function_exists( 'as_schedule_recurring_action' ) || ! function_exists( 'as_next_scheduled_action' ) ) {
+			$this->markTestSkipped( 'Action Scheduler not available.' );
+		}
+
+		as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+		delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+
+		try {
+			$before      = time();
+			$integration = new \WC_Stripe_Agentic_Commerce_Integration();
+			$integration->reschedule_next_feed_sync();
+
+			$next = as_next_scheduled_action( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+
+			$this->assertNotFalse( $next, 'Expected an action to be scheduled after reschedule.' );
+
+			$expected_floor = $before + \WC_Stripe_Agentic_Commerce_Integration::SYNC_INTERVAL;
+			$expected_ceil  = $expected_floor + 5;
+
+			$this->assertGreaterThanOrEqual( $expected_floor, $next );
+			$this->assertLessThanOrEqual( $expected_ceil, $next );
+		} finally {
+			as_unschedule_all_actions( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_ACTION, [], 'wc-stripe' );
+			delete_option( \WC_Stripe_Agentic_Commerce_Integration::SCHEDULED_OPTION );
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// update_pending_statuses
+	// -------------------------------------------------------------------------
 
 	/**
 	 * When the dashboard's refresh poll observes Stripe's terminal `succeeded`

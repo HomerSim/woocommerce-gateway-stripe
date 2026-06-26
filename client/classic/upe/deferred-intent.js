@@ -15,10 +15,12 @@ import {
 	confirmWalletPayment,
 	createAndConfirmSetupIntent,
 	getMountedUPEComponent,
+	hasEmptyRequiredFields,
 	initializeUPEComponents,
 	maybeUpdateAdaptivePricingCheckoutSession,
 	mountStripePaymentElement,
 	processPayment,
+	trackMountInProgress,
 } from './payment-processing';
 
 jQuery( function ( $ ) {
@@ -86,10 +88,13 @@ jQuery( function ( $ ) {
 	// Only attempt to mount the card element once that section of the page has loaded.
 	// We can use the updated_checkout event for this.
 	$( document.body ).on( 'updated_checkout', () => {
-		void ( async () => {
+		// Track the re-render → re-mount chain so a mid-update submission waits.
+		const updateChain = ( async () => {
 			await maybeUpdateAdaptivePricingCheckoutSession( api );
 			await maybeMountStripePaymentElement();
 		} )();
+		trackMountInProgress( updateChain );
+		void updateChain;
 	} );
 
 	function processPaymentIfNotUsingSavedMethod( $form ) {
@@ -100,7 +105,21 @@ jQuery( function ( $ ) {
 	}
 
 	$( 'form.checkout' ).on( generateCheckoutEventNames(), function () {
-		return processPaymentIfNotUsingSavedMethod( $( this ) );
+		const $form = $( this );
+
+		// Don't create a Stripe payment method if required checkout fields are empty.
+		// This prevents unnecessary Stripe API calls before WC's server-side validation.
+		// jQuery :visible filters out fields hidden by conditional checkout logic
+		// (e.g. shipping fields when "Ship to different address" is unchecked).
+		if (
+			hasEmptyRequiredFields(
+				$form.find( '.validate-required:visible' ).toArray()
+			)
+		) {
+			return;
+		}
+
+		return processPaymentIfNotUsingSavedMethod( $form );
 	} );
 
 	// Mount the Stripe Payment Elements onto the Add Payment Method page and Pay for Order page.
